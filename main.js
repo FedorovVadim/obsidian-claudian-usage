@@ -126,6 +126,26 @@ function shortLeft(resetsAt) {
   return mins ? hours + ' ч ' + mins + ' мин' : hours + ' ч';
 }
 
+/**
+ * День недели и время обнуления — для недельного лимита.
+ * До него живут дни, поэтому «через 3 дня 4 часа» читается хуже,
+ * чем «чт 12:00»: с датой в голове проще планировать неделю.
+ */
+function weekdayTime(resetsAt) {
+  if (!resetsAt) return null;
+  const when = new Date(resetsAt);
+  if (isNaN(when.getTime())) return null;
+
+  const clock = when.toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' });
+  const startOfDay = (d) => new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const days = Math.round((startOfDay(when) - startOfDay(new Date())) / 86400000);
+
+  if (days <= 0) return 'сегодня ' + clock;
+  if (days === 1) return 'завтра ' + clock;
+  const weekday = when.toLocaleDateString('ru-RU', { weekday: 'short' }).replace('.', '');
+  return weekday + ' ' + clock;
+}
+
 function humanReset(resetsAt) {
   if (!resetsAt) return 'время сброса неизвестно';
   const when = new Date(resetsAt);
@@ -279,8 +299,8 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
       return;
     }
 
-    if (this.settings.showFiveHour) this.renderGauge(el, '5 ч', this.usage.fiveHour, true);
-    if (this.settings.showWeekly) this.renderGauge(el, 'нед', this.usage.weekly);
+    if (this.settings.showFiveHour) this.renderGauge(el, '5 ч', this.usage.fiveHour, 'left');
+    if (this.settings.showWeekly) this.renderGauge(el, 'нед', this.usage.weekly, 'when');
 
     const stamp = this.updatedAt
       ? new Date(this.updatedAt).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' })
@@ -291,7 +311,7 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
       '\nНажми, чтобы обновить сейчас. Токены на это не тратятся.');
   }
 
-  renderGauge(parent, label, node, showLeft) {
+  renderGauge(parent, label, node, extra) {
     if (!node) return;
     const percent = Math.max(0, Math.min(100, Number(node.percent) || 0));
     const wrap = parent.createSpan({ cls: 'cu-gauge' });
@@ -304,12 +324,15 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
     else if (percent >= warn) fill.addClass('is-warn');
     wrap.createSpan({ cls: 'cu-num', text: Math.round(percent) + '%' });
 
-    // сколько осталось до обнуления — считается на месте, без обращений к сервису
-    if (showLeft) {
-      const left = shortLeft(node.resetsAt);
-      if (left) {
-        const el = wrap.createSpan({ cls: 'cu-left', text: '· ' + left });
-        el.setAttribute('title', 'Через столько окно обнулится (с точностью до 5 минут)');
+    // когда обнулится — считается на месте, без обращений к сервису
+    if (extra) {
+      const isLeft = extra === 'left';
+      const text = isLeft ? shortLeft(node.resetsAt) : weekdayTime(node.resetsAt);
+      if (text) {
+        const el = wrap.createSpan({ cls: 'cu-left', text: '· ' + text });
+        el.setAttribute('title', isLeft
+          ? 'Через столько окно обнулится (с точностью до 5 минут)'
+          : 'Когда обнулится недельный лимит');
       }
     }
   }
