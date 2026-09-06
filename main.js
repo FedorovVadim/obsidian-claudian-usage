@@ -25,7 +25,9 @@ const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 
 const DEFAULTS = {
-  refreshSec: 180,       // как часто обновлять шкалы (у счётчика небольшой запас обращений)
+  refreshSec: 600,       // как часто обновлять шкалы (запас обращений у счётчика очень небольшой)
+  lastUsage: null,       // последние прочитанные цифры — чтобы после запуска не быть пустым
+  lastUsageAt: null,     // когда они прочитаны
   showEmail: true,       // показывать почту учётной записи
   showFiveHour: true,    // шкала пятичасового окна
   showWeekly: true,      // шкала недельного лимита
@@ -132,9 +134,11 @@ function humanReset(resetsAt) {
 module.exports = class ClaudianUsagePlugin extends Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULTS, await this.loadData());
-    this.usage = null;
+    // цифры с прошлого запуска показываем сразу: лучше «час назад», чем пусто
+    this.usage = this.settings.lastUsage || null;
     this.error = null;
-    this.updatedAt = null;
+    this.updatedAt = this.settings.lastUsageAt || null;
+    this.failStreak = 0;
     this.email = readAccountEmail();
 
     this.statusEl = this.addStatusBarItem();
@@ -155,7 +159,7 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
 
     // вернулись к окну — показываем свежее, а не то, что было полчаса назад
     this.registerDomEvent(window, 'focus', () => {
-      if (!this.updatedAt || Date.now() - this.updatedAt > 60000) this.refresh(false);
+      if (!this.updatedAt || Date.now() - this.updatedAt > 300000) this.refresh(false);
     });
   }
 
@@ -165,7 +169,7 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
 
   scheduleRefresh() {
     if (this.timer) window.clearInterval(this.timer);
-    const sec = Math.max(120, Number(this.settings.refreshSec) || 180);
+    const sec = Math.max(300, Number(this.settings.refreshSec) || 600);
     this.timer = window.setInterval(() => this.refresh(false), sec * 1000);
     this.registerInterval(this.timer);
   }
@@ -183,14 +187,22 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
       this.error = null;
       this.backoffUntil = 0;
       this.updatedAt = Date.now();
+      this.failStreak = 0;
+      this.settings.lastUsage = this.usage;
+      this.settings.lastUsageAt = this.updatedAt;
+      await this.saveData(this.settings);
       this.email = readAccountEmail() || this.email;
       if (loud) new Notice(this.summaryText(), 6000);
     } catch (e) {
       this.error = (e && e.message) ? e.message : String(e);
       if (e && e.retryAfter) {
-        // сервис иногда отвечает «подожди 0 секунд» и снова отказывает —
-        // поэтому держим свою нижнюю границу, чтобы не долбить его по кругу
-        const waitMs = Math.max(60, e.retryAfter + 5) * 1000;
+        // сервис иногда отвечает «подожди 0 секунд» и снова отказывает.
+        // Держим свою нижнюю границу и увеличиваем паузу с каждым отказом:
+        // 2 минуты, 5, 10, 20 и дальше не чаще получаса.
+        this.failStreak = (this.failStreak || 0) + 1;
+        const ladder = [120, 300, 600, 1200, 1800];
+        const own = ladder[Math.min(this.failStreak - 1, ladder.length - 1)];
+        const waitMs = Math.max(own, e.retryAfter + 5) * 1000;
         this.backoffUntil = Date.now() + waitMs;
         // не ждём очередного круга опроса: спросим ровно тогда, когда разрешили
         if (this.retryTimer) window.clearTimeout(this.retryTimer);
@@ -302,8 +314,8 @@ class ClaudianUsageSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Как часто обновлять')
-      .setDesc('В секундах. Чаще двух минут нельзя: у счётчика небольшой запас обращений, за частые он временно перестаёт отвечать. Лимиты живут часами, так что чаще и не нужно.')
-      .addSlider(sl => sl.setLimits(120, 600, 30).setValue(s.refreshSec).setDynamicTooltip()
+      .setDesc('В секундах. Чаще пяти минут нельзя: запас обращений у счётчика очень небольшой. Лимиты живут часами, так что чаще и незачем.')
+      .addSlider(sl => sl.setLimits(300, 1800, 60).setValue(s.refreshSec).setDynamicTooltip()
         .onChange(async v => { s.refreshSec = v; await save(); this.plugin.scheduleRefresh(); }));
 
     new Setting(containerEl)
