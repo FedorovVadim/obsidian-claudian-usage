@@ -25,7 +25,7 @@ const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 
 const DEFAULTS = {
-  refreshSec: 90,        // как часто обновлять шкалы (у счётчика свой предел частоты)
+  refreshSec: 120,       // как часто обновлять шкалы (у счётчика свой предел частоты)
   showEmail: true,       // показывать почту учётной записи
   showFiveHour: true,    // шкала пятичасового окна
   showWeekly: true,      // шкала недельного лимита
@@ -159,9 +159,13 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
     });
   }
 
+  onunload() {
+    if (this.retryTimer) window.clearTimeout(this.retryTimer);
+  }
+
   scheduleRefresh() {
     if (this.timer) window.clearInterval(this.timer);
-    const sec = Math.max(60, Number(this.settings.refreshSec) || 90);
+    const sec = Math.max(60, Number(this.settings.refreshSec) || 120);
     this.timer = window.setInterval(() => this.refresh(false), sec * 1000);
     this.registerInterval(this.timer);
   }
@@ -183,7 +187,13 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
       if (loud) new Notice(this.summaryText(), 6000);
     } catch (e) {
       this.error = (e && e.message) ? e.message : String(e);
-      if (e && e.retryAfter) this.backoffUntil = Date.now() + (e.retryAfter + 5) * 1000;
+      if (e && e.retryAfter) {
+        const waitMs = (e.retryAfter + 5) * 1000;
+        this.backoffUntil = Date.now() + waitMs;
+        // не ждём очередного круга опроса: спросим ровно тогда, когда разрешили
+        if (this.retryTimer) window.clearTimeout(this.retryTimer);
+        this.retryTimer = window.setTimeout(() => this.refresh(false), waitMs + 1000);
+      }
       if (loud) new Notice('Расход Claude не читается: ' + this.error, 6000);
     }
     this.render();
@@ -213,11 +223,15 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
     }
 
     if (this.error && !this.usage) {
-      const hint = this.error === 'вход устарел'
-        ? 'Claude Code просит войти заново'
-        : 'расход не читается: ' + this.error;
+      // пока цифр нет, но причина временная — не пугаем красными словами
+      const waiting = this.backoffUntil && Date.now() < this.backoffUntil;
+      const hint = this.error === 'вход устарел' ? 'Claude Code просит войти заново'
+                 : waiting ? 'жду счётчик…'
+                 : 'расход не читается: ' + this.error;
       el.createSpan({ cls: 'cu-error', text: hint });
-      el.setAttribute('title', 'Нажми, чтобы попробовать ещё раз');
+      el.setAttribute('title', waiting
+        ? 'Счётчик ограничивает частоту обращений. Сам спрошу ещё раз через несколько секунд.'
+        : 'Нажми, чтобы попробовать ещё раз');
       return;
     }
     if (!this.usage) {
