@@ -68,3 +68,10 @@
 .cu-status.cu-stale .cu-bar {
   opacity: 0.55;
 }
+
+/* остаток до обнуления пятичасового окна */
+.cu-left {
+  color: var(--text-faint);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

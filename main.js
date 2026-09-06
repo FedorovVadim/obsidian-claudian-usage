@@ -104,6 +104,28 @@ async function fetchUsage() {
 // Показ времени сброса
 // ────────────────────────────────────────────────────────────────────────────
 
+/**
+ * Сколько осталось до обнуления, шагом в 5 минут.
+ * Округляем вниз: лучше сказать «осталось 10 минут», когда их 14,
+ * чем наоборот — на этом строятся решения «успею или нет».
+ */
+function shortLeft(resetsAt) {
+  if (!resetsAt) return null;
+  const when = new Date(resetsAt);
+  if (isNaN(when.getTime())) return null;
+  const left = when.getTime() - Date.now();
+  if (left <= 0) return 'вот-вот';
+
+  const step = 5;
+  const totalMin = Math.floor(left / 60000 / step) * step;
+  if (totalMin < step) return 'меньше 5 мин';
+
+  const hours = Math.floor(totalMin / 60);
+  const mins = totalMin % 60;
+  if (!hours) return mins + ' мин';
+  return mins ? hours + ' ч ' + mins + ' мин' : hours + ' ч';
+}
+
 function humanReset(resetsAt) {
   if (!resetsAt) return 'время сброса неизвестно';
   const when = new Date(resetsAt);
@@ -156,6 +178,10 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
     this.render();
     this.refresh(false);
     this.scheduleRefresh();
+
+    // перерисовка раз в минуту: остаток до обнуления должен таять на глазах.
+    // Это только пересчёт по уже известному времени — сервис не тревожим.
+    this.registerInterval(window.setInterval(() => this.render(), 60000));
 
     // вернулись к окну — показываем свежее, а не то, что было полчаса назад
     this.registerDomEvent(window, 'focus', () => {
@@ -253,7 +279,7 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
       return;
     }
 
-    if (this.settings.showFiveHour) this.renderGauge(el, '5 ч', this.usage.fiveHour);
+    if (this.settings.showFiveHour) this.renderGauge(el, '5 ч', this.usage.fiveHour, true);
     if (this.settings.showWeekly) this.renderGauge(el, 'нед', this.usage.weekly);
 
     const stamp = this.updatedAt
@@ -265,7 +291,7 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
       '\nНажми, чтобы обновить сейчас. Токены на это не тратятся.');
   }
 
-  renderGauge(parent, label, node) {
+  renderGauge(parent, label, node, showLeft) {
     if (!node) return;
     const percent = Math.max(0, Math.min(100, Number(node.percent) || 0));
     const wrap = parent.createSpan({ cls: 'cu-gauge' });
@@ -277,6 +303,15 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
     if (percent >= 95) fill.addClass('is-critical');
     else if (percent >= warn) fill.addClass('is-warn');
     wrap.createSpan({ cls: 'cu-num', text: Math.round(percent) + '%' });
+
+    // сколько осталось до обнуления — считается на месте, без обращений к сервису
+    if (showLeft) {
+      const left = shortLeft(node.resetsAt);
+      if (left) {
+        const el = wrap.createSpan({ cls: 'cu-left', text: '· ' + left });
+        el.setAttribute('title', 'Через столько окно обнулится (с точностью до 5 минут)');
+      }
+    }
   }
 };
 
