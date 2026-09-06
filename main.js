@@ -25,7 +25,7 @@ const USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 const KEYCHAIN_SERVICE = 'Claude Code-credentials';
 
 const DEFAULTS = {
-  refreshSec: 120,       // как часто обновлять шкалы (у счётчика свой предел частоты)
+  refreshSec: 180,       // как часто обновлять шкалы (у счётчика небольшой запас обращений)
   showEmail: true,       // показывать почту учётной записи
   showFiveHour: true,    // шкала пятичасового окна
   showWeekly: true,      // шкала недельного лимита
@@ -165,7 +165,7 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
 
   scheduleRefresh() {
     if (this.timer) window.clearInterval(this.timer);
-    const sec = Math.max(60, Number(this.settings.refreshSec) || 120);
+    const sec = Math.max(120, Number(this.settings.refreshSec) || 180);
     this.timer = window.setInterval(() => this.refresh(false), sec * 1000);
     this.registerInterval(this.timer);
   }
@@ -188,7 +188,9 @@ module.exports = class ClaudianUsagePlugin extends Plugin {
     } catch (e) {
       this.error = (e && e.message) ? e.message : String(e);
       if (e && e.retryAfter) {
-        const waitMs = (e.retryAfter + 5) * 1000;
+        // сервис иногда отвечает «подожди 0 секунд» и снова отказывает —
+        // поэтому держим свою нижнюю границу, чтобы не долбить его по кругу
+        const waitMs = Math.max(60, e.retryAfter + 5) * 1000;
         this.backoffUntil = Date.now() + waitMs;
         // не ждём очередного круга опроса: спросим ровно тогда, когда разрешили
         if (this.retryTimer) window.clearTimeout(this.retryTimer);
@@ -300,8 +302,8 @@ class ClaudianUsageSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName('Как часто обновлять')
-      .setDesc('В секундах. Чаще минуты нельзя: у счётчика свой предел частоты, за частые обращения он временно перестаёт отвечать.')
-      .addSlider(sl => sl.setLimits(60, 300, 10).setValue(s.refreshSec).setDynamicTooltip()
+      .setDesc('В секундах. Чаще двух минут нельзя: у счётчика небольшой запас обращений, за частые он временно перестаёт отвечать. Лимиты живут часами, так что чаще и не нужно.')
+      .addSlider(sl => sl.setLimits(120, 600, 30).setValue(s.refreshSec).setDynamicTooltip()
         .onChange(async v => { s.refreshSec = v; await save(); this.plugin.scheduleRefresh(); }));
 
     new Setting(containerEl)

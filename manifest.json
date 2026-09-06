@@ -1,7 +1,7 @@
 {
   "id": "claudian-usage",
   "name": "Claudian Usage",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "minAppVersion": "1.7.2",
   "description": "Внизу окна показывает, под какой учётной записью выполнен вход в Claude Code, и две шкалы расхода — пятичасовую и недельную.",
   "author": "Vadim Fedorov + Claudian",
