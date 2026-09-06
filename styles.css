@@ -1,0 +1,70 @@
+/* Claudian Usage — строка расхода Claude внизу окна */
+
+/* order отрицательный — чтобы блок стоял левее «Обратных ссылок» и прочих */
+.cu-status {
+  order: -100;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-2);
+  cursor: pointer;
+}
+
+.cu-account {
+  color: var(--text-muted);
+  white-space: nowrap;
+}
+
+.cu-gauge {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-2-2);
+  white-space: nowrap;
+}
+
+.cu-label {
+  color: var(--text-faint);
+  font-size: var(--font-smallest);
+}
+
+.cu-bar {
+  position: relative;
+  display: inline-block;
+  width: 46px;
+  height: 6px;
+  border-radius: 3px;
+  background-color: var(--background-modifier-border);
+  overflow: hidden;
+}
+
+.cu-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px;
+  background-color: var(--interactive-accent);
+  transition: width 320ms ease;
+}
+
+.cu-fill.is-warn {
+  background-color: var(--color-orange, #d68b28);
+}
+
+.cu-fill.is-critical {
+  background-color: var(--color-red, #c0392b);
+}
+
+.cu-num {
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  min-width: 2.6em;
+}
+
+.cu-error {
+  color: var(--text-faint);
+}
+
+/* последняя попытка не удалась — приглушаем, чтобы старые цифры не выдавались за свежие */
+.cu-status.cu-stale .cu-account,
+.cu-status.cu-stale .cu-num,
+.cu-status.cu-stale .cu-bar {
+  opacity: 0.55;
+}
