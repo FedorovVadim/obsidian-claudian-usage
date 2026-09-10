@@ -69,6 +69,13 @@
   opacity: 0.55;
 }
 
+/* счётчик попросил паузу — знак, что плагин жив и вернётся сам, нажимать не нужно */
+.cu-wait {
+  color: var(--text-faint);
+  font-size: var(--font-smallest);
+  opacity: 0.8;
+}
+
 /* остаток до обнуления пятичасового окна */
 .cu-left {
   color: var(--text-faint);
