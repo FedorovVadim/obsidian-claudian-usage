@@ -58,6 +58,7 @@ const DEFAULTS = {
   lastUsage: null,       // последние прочитанные цифры — чтобы после запуска не быть пустым
   lastUsageAt: null,     // когда они прочитаны
   lastOutcome: null,     // чем закончилось последнее обращение — видно в настройках
+  pauseUntil: 0,         // до какого времени счётчик просил не беспокоить (переживает перезапуск)
 };
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -89,18 +90,24 @@ function readAccountEmail() {
  * а локальных следов не оставляет. Поэтому в спокойном режиме мы всё равно
  * заглядываем к счётчику раз в четверть часа — иначе такой расход остался бы незамеченным.
  */
-function claudeBusySince(sinceMs) {
-  if (!sinceMs) return true;
-  const fs = require('fs');
+function busyMarkers() {
   const os = require('os');
   const path = require('path');
   const home = os.homedir();
-  const marks = [
+  // Рабочая лошадка здесь одна — ~/.claude.json: Claude Code переписывает его
+  // каждые 15-60 секунд, пока занят. Две папки ниже меняются заметно реже
+  // (только когда внутри появляется новый файл) и идут вторым эшелоном.
+  return [
     path.join(home, '.claude.json'),
     path.join(home, '.claude', 'telemetry'),
     path.join(home, '.claude', 'session-env'),
   ];
-  for (const p of marks) {
+}
+
+function claudeBusySince(sinceMs, marks) {
+  if (!sinceMs) return true;
+  const fs = require('fs');
+  for (const p of (marks || busyMarkers())) {
     try {
       if (fs.statSync(p).mtimeMs > sinceMs) return true;
     } catch (e) { /* нет файла — просто не признак */ }
@@ -108,22 +115,38 @@ function claudeBusySince(sinceMs) {
   return false;
 }
 
-/** Пропуск Claude Code из связки ключей macOS */
+/**
+ * Пропуск Claude Code из связки ключей macOS.
+ *
+ * Читаем не блокирующе: связка может попросить отпечаток или быть заперта,
+ * и тогда синхронное чтение подвесило бы всё окно Obsidian на десять секунд.
+ * Текст ошибки наружу не отдаём — в нём мог бы оказаться кусок самого пропуска.
+ */
 function readAccessToken() {
-  const { execFileSync } = require('child_process');
-  const raw = execFileSync(
-    '/usr/bin/security',
-    ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
-    { encoding: 'utf8', timeout: 10000 },
-  );
-  const oauth = (JSON.parse(raw) || {}).claudeAiOauth || {};
-  if (!oauth.accessToken) throw new Error('в связке ключей нет пропуска');
-  return oauth.accessToken;
+  const { execFile } = require('child_process');
+  return new Promise((resolve, reject) => {
+    execFile(
+      '/usr/bin/security',
+      ['find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
+      { encoding: 'utf8', timeout: 10000 },
+      (err, stdout) => {
+        if (err) return reject(new Error('связка ключей не отдала пропуск'));
+        let token = null;
+        try {
+          token = ((JSON.parse(stdout) || {}).claudeAiOauth || {}).accessToken || null;
+        } catch (e) {
+          return reject(new Error('запись в связке ключей не читается'));
+        }
+        if (!token) return reject(new Error('в связке ключей нет пропуска'));
+        resolve(token);
+      },
+    );
+  });
 }
 
 /** Проценты расхода по двум лимитам */
 async function fetchUsage() {
-  const token = readAccessToken();
+  const token = await readAccessToken();
   const resp = await requestUrl({
     url: USAGE_URL,
     method: 'GET',
@@ -158,14 +181,27 @@ async function fetchUsage() {
   }
 
   const data = resp.json || {};
+  // Берём только настоящее число. Раньше строка или объект превращались в ноль,
+  // и шкала уверенно показывала «0 % — запас свободен»; из всех возможных
+  // ошибок в этом плагине эта самая опасная.
   const pick = (node) => {
-    if (!node || node.utilization === null || node.utilization === undefined) return null;
-    return { percent: Number(node.utilization), resetsAt: node.resets_at || null };
+    if (!node || typeof node.utilization !== 'number' || !Number.isFinite(node.utilization)) return null;
+    return { percent: node.utilization, resetsAt: node.resets_at || null };
   };
-  return {
+  const usage = {
     fiveHour: pick(data.five_hour),
     weekly: pick(data.seven_day),
   };
+
+  // Ответ «200, но цифр нет» — это отказ, а не успех: так бывает, если поля
+  // переименуют или вместо ответа придёт страница от прокси. Молча принять его
+  // значило бы стереть последние хорошие цифры и оставить пустое место внизу окна.
+  if (!usage.fiveHour && !usage.weekly) {
+    const err = new Error('счётчик ответил без цифр');
+    err.status = 'пусто';
+    throw err;
+  }
+  return usage;
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -179,11 +215,18 @@ async function fetchUsage() {
 function decidePoll(st) {
   if (st.pending) return null;                                  // уже спрашиваем
   if (st.pauseUntil && st.now < st.pauseUntil) return null;      // сервис просил не беспокоить
+
   const since = st.now - (st.lastAttemptAt || 0);
+  // часы перевели назад — «прошло минус двадцать минут», и по обычному счёту
+  // мы бы молчали до конца сдвига. Считаем это поводом спросить, а не молчать.
+  if (since < 0) return 'часы сдвинулись';
   if (since < MIN_GAP_MS) return null;                           // слишком близко к прошлому обращению
 
-  // окно обнулилось — на экране заведомо неверное число, ждать общей очереди незачем
-  if (st.resetsAt) {
+  // Окно обнулилось — на экране заведомо неверное число, ждать общей очереди незачем.
+  // Строго один раз на каждое время обнуления: если сервис почему-то продолжает
+  // отдавать прошедший срок, без этой памяти мы бы спрашивали каждые полминуты
+  // и сами загнали бы себя в отказ «слишком часто».
+  if (st.resetsAt && st.resetsAt !== st.resetSeen) {
     const t = new Date(st.resetsAt).getTime();
     if (Number.isFinite(t) && t <= st.now) return 'окно обнулилось';
   }
@@ -195,7 +238,7 @@ function decidePoll(st) {
 
 /**
  * Сколько молчать после отказа.
- * Срок от сервиса главнее нашего, но не короче получаса секунд и не длиннее десяти минут:
+ * Срок от сервиса главнее нашего, но не короче 30 секунд и не длиннее десяти минут:
  * прошлая версия уходила в тишину на полчаса, и цифры застывали надолго.
  */
 function pauseSeconds(status, retryAfter, failStreak) {
@@ -206,6 +249,26 @@ function pauseSeconds(status, retryAfter, failStreak) {
   if (status === 429) return retryAfter ? clamp(retryAfter + 5) : clamp(own);
   if (status === 401 || status === 403) return 300;   // пока не войдут заново — спрашивать бесполезно
   return clamp(own);
+}
+
+/**
+ * Что можно записать на диск про неудачу.
+ * Только свои формулировки: чужой текст ошибки уносит в хранилище лишнее,
+ * а хранилище у людей нередко и синхронизируется, и лежит в git.
+ */
+const KNOWN_NOTES = [
+  'счётчик просит подождать',
+  'вход устарел',
+  'счётчик ответил без цифр',
+  'связка ключей не отдала пропуск',
+  'запись в связке ключей не читается',
+  'в связке ключей нет пропуска',
+];
+function safeNote(message) {
+  const text = String(message || '');
+  if (KNOWN_NOTES.includes(text)) return text;
+  if (/^сервис ответил \d{3}$/.test(text)) return text;
+  return 'не удалось связаться со счётчиком';
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -309,26 +372,30 @@ class ClaudianUsagePlugin extends Plugin {
     this.updatedAt = this.settings.lastUsageAt || null;
     this.error = null;
     this.failStreak = 0;
-    this.pauseUntil = 0;      // до этого времени счётчик просил не беспокоить
-    this.lastAttemptAt = 0;   // когда обращались в прошлый раз — удачно или нет
+    // Паузу и время прошлого обращения поднимаем с диска. Иначе каждая перезагрузка
+    // плагина (а при двух открытых хранилищах — сразу две) шла к счётчику в обход
+    // всех ограничений, включая паузу, о которой он только что попросил.
+    this.pauseUntil = Number(this.settings.pauseUntil) || 0;
+    this.lastAttemptAt = Number(this.settings.lastUsageAt) || 0;
     this.pending = false;
+    this.resetSeen = null;    // время обнуления, по которому мы уже сходили вне очереди
+    this.busy = true;         // работает ли Claude Code прямо сейчас — считаем раз в пульс
     this.email = readAccountEmail();
 
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass('cu-status');
-    this.statusEl.addEventListener('click', () => this.refresh(true));
+    this.registerDomEvent(this.statusEl, 'click', () => { this.refresh(true); });
 
     this.addCommand({
       id: 'refresh',
       name: 'Обновить расход Claude',
-      callback: () => this.refresh(true),
+      callback: () => { this.refresh(true); },
     });
 
     this.addSettingTab(new ClaudianUsageSettingTab(this.app, this));
 
-    this.render();
-    this.tick();
-
+    // Пульс и слушатели регистрируем ДО первой отрисовки: споткнись отрисовка,
+    // плагин остался бы загруженным, но навсегда немым.
     // Один короткий пульс на всё: и остаток времени пересчитать, и решить, пора ли
     // спрашивать счётчик. Длинные таймеры Obsidian в фоне придерживает, а этот
     // сверяется с часами — опоздав, он навёрстывает сразу, а не ждёт следующего круга.
@@ -339,32 +406,57 @@ class ClaudianUsagePlugin extends Plugin {
     this.registerDomEvent(document, 'visibilitychange', () => {
       if (!document.hidden) this.tick();
     });
+
+    this.tick();
   }
+
+  activeSec() { return Math.max(60, Number(this.settings.activeSec) || 120); }
+  idleSec() { return Math.max(300, Number(this.settings.idleSec) || 900); }
 
   /** Пульс: перерисовать время и, если пора, спросить счётчик */
   tick() {
+    // busyMarks задаётся только в проверках, чтобы признак «Claude Code работает»
+    // можно было задать наперёд; в работе берутся настоящие пути
+    this.busy = claudeBusySince(this.lastAttemptAt, this.busyMarks);
     this.render();
     const why = decidePoll({
       now: Date.now(),
       lastAttemptAt: this.lastAttemptAt,
       pauseUntil: this.pauseUntil,
       pending: this.pending,
-      busy: claudeBusySince(this.lastAttemptAt),
-      activeSec: Math.max(60, Number(this.settings.activeSec) || 120),
-      idleSec: Math.max(300, Number(this.settings.idleSec) || 900),
+      busy: this.busy,
+      activeSec: this.activeSec(),
+      idleSec: this.idleSec(),
       resetsAt: this.usage && this.usage.fiveHour ? this.usage.fiveHour.resetsAt : null,
+      resetSeen: this.resetSeen,
     });
     if (why) this.refresh(false);
+  }
+
+  /** Запись настроек на диск — отдельно от разговора с счётчиком, со своей обработкой сбоя */
+  async persist() {
+    try {
+      await this.saveData(this.settings);
+    } catch (e) {
+      // Диск полон или папка только для чтения — цифры на экране от этого не портятся.
+      // Раньше такой сбой выдавался за отказ счётчика и глушил опрос на минуты.
+      console.error('Claudian Usage: не удалось сохранить настройки', e);
+    }
   }
 
   async refresh(loud) {
     const now = Date.now();
 
     if (this.pauseUntil && now < this.pauseUntil) {
-      // счётчик попросил паузу — молча ждём, старые цифры остаются на экране
-      if (loud) new Notice(this.pauseText(), 7000);
-      this.render();
-      return;
+      // Счётчик попросил паузу. Сами не лезем, но человеку разрешаем перебить:
+      // именно он смотрит на застывшие цифры и хочет их сдвинуть. MIN_GAP_MS
+      // не даёт превратить это в частые нажатия подряд.
+      const mayOverride = loud && (now - this.lastAttemptAt >= MIN_GAP_MS);
+      if (!mayOverride) {
+        if (loud) new Notice(this.pauseText(), 7000);
+        this.render();
+        return;
+      }
     }
     if (this.pending) {
       if (loud) new Notice('Уже спрашиваю счётчик, секунду…', 3000);
@@ -373,8 +465,19 @@ class ClaudianUsagePlugin extends Plugin {
 
     this.pending = true;
     this.lastAttemptAt = now;
+    // отмечаем, что по этому времени обнуления мы сходили — второй раз не пойдём
+    this.resetSeen = this.usage && this.usage.fiveHour ? this.usage.fiveHour.resetsAt : null;
+
+    let fresh = null;
+    let failure = null;
     try {
-      this.usage = await fetchUsage();
+      fresh = await fetchUsage();
+    } catch (e) {
+      failure = e || new Error('неизвестная причина');
+    }
+
+    if (fresh) {
+      this.usage = fresh;
       this.error = null;
       this.failStreak = 0;
       this.pauseUntil = 0;
@@ -382,23 +485,28 @@ class ClaudianUsagePlugin extends Plugin {
       this.email = readAccountEmail() || this.email;
       this.settings.lastUsage = this.usage;
       this.settings.lastUsageAt = this.updatedAt;
+      this.settings.pauseUntil = 0;
       this.settings.lastOutcome = { at: this.updatedAt, ok: true, note: 'счётчик ответил' };
-      await this.saveData(this.settings);
-      if (loud) new Notice(this.summaryText(), 6000);
-    } catch (e) {
-      const status = e ? e.status : null;
-      this.error = (e && e.message) ? e.message : String(e);
+    } else {
+      const status = failure.status || null;
+      this.error = failure.message || 'неизвестная причина';
       this.failStreak += 1;
-      const waitSec = pauseSeconds(status, e ? e.retryAfter : null, this.failStreak);
+      const waitSec = pauseSeconds(status, failure.retryAfter, this.failStreak);
       this.pauseUntil = Date.now() + waitSec * 1000;
+      this.settings.pauseUntil = this.pauseUntil;
+      // на диск кладём только свои же формулировки и код состояния —
+      // чужой текст ошибки может унести в хранилище лишнее
       this.settings.lastOutcome = {
-        at: Date.now(), ok: false, status: status || null, note: this.error, waitSec,
+        at: Date.now(), ok: false, status: status, note: safeNote(this.error), waitSec,
       };
-      await this.saveData(this.settings);
-      if (loud) new Notice(this.failText(status), 8000);
-    } finally {
-      this.pending = false;
-      this.render();
+    }
+
+    await this.persist();
+    this.pending = false;
+    this.render();
+
+    if (loud) {
+      new Notice(fresh ? this.summaryText() : this.failText(failure.status || null), fresh ? 6000 : 8000);
     }
   }
 
@@ -427,6 +535,10 @@ class ClaudianUsagePlugin extends Plugin {
       return 'Claude Code просит войти заново.\n'
            + 'Открой терминал, набери claude и выполни вход — дальше цифры вернутся сами.';
     }
+    if (status === 'пусто') {
+      return 'Счётчик ответил, но цифр в ответе не было.\n'
+           + had + 'Старые цифры не трогаю, попробую сам в ' + back + '.';
+    }
     return 'Не получилось спросить счётчик: ' + this.error + '.\n' + had + 'Попробую сам в ' + back + '.';
   }
 
@@ -448,11 +560,14 @@ class ClaudianUsagePlugin extends Plugin {
     if (this.pauseUntil && Date.now() < this.pauseUntil) {
       return 'Счётчик просил паузу до ' + hhmm(this.pauseUntil);
     }
-    const busy = claudeBusySince(this.lastAttemptAt);
-    const everySec = busy
-      ? Math.max(60, Number(this.settings.activeSec) || 120)
-      : Math.max(300, Number(this.settings.idleSec) || 900);
-    const when = Math.max(Date.now(), (this.lastAttemptAt || Date.now()) + everySec * 1000);
+    // признак «Claude Code работает» считается раз в пульс, здесь только читается:
+    // иначе каждая отрисовка лезла бы в файловую систему заново
+    const busy = this.busy;
+    const everySec = busy ? this.activeSec() : this.idleSec();
+    const when = Math.max(
+      Date.now(),
+      (this.lastAttemptAt || 0) + Math.max(MIN_GAP_MS, everySec * 1000),
+    );
     return 'Следующая проверка около ' + hhmm(when)
          + (busy ? ' — Claude Code сейчас работает' : ' — Claude Code молчит, расти проценту неоткуда');
   }
@@ -476,7 +591,10 @@ class ClaudianUsagePlugin extends Plugin {
       acc.setAttribute('title', 'Учётная запись Claude Code');
     }
 
-    if (!this.usage) {
+    // «цифры есть, но обе пустые» — такое могло остаться в настройках от прошлых версий;
+    // показываем это как «цифр нет», а не как пустое место внизу окна
+    const hasNumbers = !!(this.usage && (this.usage.fiveHour || this.usage.weekly));
+    if (!hasNumbers) {
       const waiting = this.pauseUntil && Date.now() < this.pauseUntil;
       const hint = this.error === 'вход устарел' ? 'Claude Code просит войти заново'
                  : waiting ? 'жду счётчик…'
@@ -612,4 +730,8 @@ class ClaudianUsageSettingTab extends PluginSettingTab {
 module.exports = ClaudianUsagePlugin;
 
 // открыто для проверок из node: решения про частоту считаются здесь и нигде больше
-module.exports.__internals = { decidePoll, pauseSeconds, humanAge, shortLeft, weekdayTime, TICK_MS, MIN_GAP_MS };
+module.exports.__internals = {
+  decidePoll, pauseSeconds, safeNote, humanAge, shortLeft, weekdayTime,
+  claudeBusySince, busyMarkers, fetchUsage, readAccountEmail,
+  TICK_MS, MIN_GAP_MS, PAUSE_MIN_SEC, PAUSE_MAX_SEC, DEFAULTS,
+};
