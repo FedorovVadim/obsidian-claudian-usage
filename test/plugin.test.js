@@ -107,6 +107,11 @@ function check(name, got, want) {
     + (ok ? '' : `\n      получили: ${JSON.stringify(got)}\n      ожидали:  ${JSON.stringify(want)}`));
 }
 
+/** процент пятичасового окна так, чтобы проверка падала внятно, а не рушилась */
+const five = (p) => (p.usage && p.usage.fiveHour ? p.usage.fiveHour.percent : null);
+const fiveSaved = (p) => (p._data && p._data.lastUsage && p._data.lastUsage.fiveHour
+  ? p._data.lastUsage.fiveHour.percent : null);
+
 const ok200 = (five, week, resetsAt) => ({
   status: 200,
   headers: {},
@@ -158,13 +163,13 @@ async function advance(plugin, seconds) {
   {
     const p = await start({});
     check('на запуске спрашивает счётчик сам', requests, 1);
-    check('цифры показаны', [p.usage.fiveHour.percent, p.usage.weekly.percent], [50, 10]);
+    check('цифры показаны', [five(p), p.usage.weekly && p.usage.weekly.percent], [50, 10]);
     check('шкалы нарисованы', shownText(p.statusEl).includes('50%'), true);
-    check('цифры сохранены на диск', p._data.lastUsage.fiveHour.percent, 50);
+    check('цифры сохранены на диск', fiveSaved(p), 50);
 
     answer = ok200(55, 11);
     await advance(p, 120);
-    check('через 2 минуты работы обновился сам, без нажатия', p.usage.fiveHour.percent, 55);
+    check('через 2 минуты работы обновился сам, без нажатия', five(p), 55);
     check('обращений ровно два — лишних нет', requests, 2);
   }
 
@@ -173,7 +178,7 @@ async function advance(plugin, seconds) {
     const p = await start({});
     answer = tooOften(55);
     await advance(p, 120);
-    check('после отказа цифры на экране остались прежними', p.usage.fiveHour.percent, 50);
+    check('после отказа цифры на экране остались прежними', five(p), 50);
     check('пауза взята из ответа сервиса', Math.round((p.pauseUntil - NOW) / 1000), 60);
 
     const before = requests;
@@ -182,7 +187,7 @@ async function advance(plugin, seconds) {
 
     answer = ok200(60, 12);
     await advance(p, 90);
-    check('пауза кончилась — вернулся сам, нажимать не пришлось', p.usage.fiveHour.percent, 60);
+    check('пауза кончилась — вернулся сам, нажимать не пришлось', five(p), 60);
     check('после успеха пауза снята', p.pauseUntil, 0);
   }
   {
@@ -200,22 +205,22 @@ async function advance(plugin, seconds) {
     const p = await start({});
     answer = { status: 200, headers: {}, json: { five_hour: null, seven_day: null } };
     await advance(p, 120);
-    check('ответ без цифр не стёр прежние', p.usage.fiveHour.percent, 50);
-    check('пустышка не записана на диск', p._data.lastUsage.fiveHour.percent, 50);
+    check('ответ без цифр не стёр прежние', five(p), 50);
+    check('пустышка не записана на диск', fiveSaved(p), 50);
     check('строка внизу окна не опустела', shownText(p.statusEl).includes('50%'), true);
   }
   {
     const p = await start({});
     answer = { status: 200, headers: {}, json: { five_hour: { utilization: 'много' }, seven_day: { utilization: {} } } };
     await advance(p, 120);
-    check('мусор вместо процента не превратился в спокойный 0%', p.usage.fiveHour.percent, 50);
-    check('и не записан на диск', p._data.lastUsage.fiveHour.percent, 50);
+    check('мусор вместо процента не превратился в спокойный 0%', five(p), 50);
+    check('и не записан на диск', fiveSaved(p), 50);
   }
   {
     const p = await start({});
     answer = { status: 200, headers: {}, json: null };   // прокси вернул не то
     await advance(p, 120);
-    check('пустой ответ не сломал показ', p.usage.fiveHour.percent, 50);
+    check('пустой ответ не сломал показ', five(p), 50);
   }
 
   console.log('\nСбой записи на диск — это не отказ счётчика');
@@ -223,7 +228,7 @@ async function advance(plugin, seconds) {
     const realErr = console.error;
     console.error = () => { };   // жалоба на диск здесь ожидаема, не засоряем вывод
     const p = await start({ saveThrows: true });
-    check('цифры прочитаны', p.usage.fiveHour.percent, 50);
+    check('цифры прочитаны', five(p), 50);
     check('ошибка счётчика не выдумана', p.error, null);
     check('опрос не заглушён паузой', p.pauseUntil, 0);
     const before = requests;
@@ -263,7 +268,7 @@ async function advance(plugin, seconds) {
     await again.onload();
     await settle();
     check('перезапуск плагина не лезет к счётчику в обход паузы', requests, 0);
-    check('и показывает прежние цифры, а не пустоту', again.usage.fiveHour.percent, 50);
+    check('и показывает прежние цифры, а не пустоту', five(again), 50);
   }
 
   console.log('\nОдновременные попытки');
