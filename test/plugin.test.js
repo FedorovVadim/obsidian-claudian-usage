@@ -329,6 +329,75 @@ async function advance(plugin, seconds) {
     check('главный след ~/.claude.json на месте', fs.existsSync(busyMarkers()[0]), true);
   }
 
+  console.log('\nНесколько учётных записей Anthropic');
+  {
+    // Домашнюю папку подменяем на временную: плагин узнаёт учётную запись из
+    // ~/.claude.json, и другого способа «сменить аккаунт» в проверке нет.
+    const realHome = os.homedir;
+    const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cu-home-'));
+    const login = (email) => fs.writeFileSync(path.join(fakeHome, '.claude.json'),
+      JSON.stringify({ oauthAccount: { emailAddress: email } }));
+    os.homedir = () => fakeHome;
+
+    try {
+      // 1. Под учётной записью A снимаем настоящие цифры — через настоящий разбор ответа
+      login('a@example.com');
+      const a = await start({ answer: ok200(77, 33) });
+      await advance(a, 130);
+      check('цифры учётной записи A получены', five(a), 77);
+      check('вместе с цифрами записано, чьи они', a._data.lastUsageEmail, 'a@example.com');
+
+      // Снимок диска — с ним плагин запустится в следующий раз
+      const diskA = JSON.parse(JSON.stringify(a._data));
+
+      // 2. Тот же аккаунт, связи нет: показать вчерашние цифры — правильно
+      login('a@example.com');
+      const again = await start({ data: diskA, answer: tooOften(600) });
+      check('свои прошлые цифры при обрыве связи остаются', five(again), 77);
+
+      // 3. Вход выполнен под B, а на диске цифры A. Связи нет — свежие взять неоткуда.
+      //    Показать при этом 77% значило бы солгать про другой аккаунт.
+      login('b@example.com');
+      const other = await start({ data: diskA, answer: tooOften(600) });
+      check('чужие цифры при запуске не показываются', five(other), null);
+      check('и с диска они убраны', other.settings.lastUsage, null);
+
+      // 4. Переключение на ходу: плагин уже работает, человек сменил аккаунт
+      login('a@example.com');
+      const live = await start({ answer: ok200(77, 33) });
+      await advance(live, 130);
+      check('перед переключением цифры A на экране', five(live), 77);
+
+      login('b@example.com');
+      answer = ok200(12, 4);
+      live.tick();
+      await settle();
+      check('после переключения чужие цифры сняты сразу', five(live) !== 77, true);
+      await advance(live, 130);
+      check('и заменены цифрами учётной записи B', five(live), 12);
+      check('подпись под цифрами тоже новая', live._data.lastUsageEmail, 'b@example.com');
+
+      // 5. Пауза, о которой просил счётчик прежнего аккаунта, не должна запирать новый
+      login('a@example.com');
+      const paused = await start({ data: diskA, answer: tooOften(600) });
+      await advance(paused, 130);
+      check('счётчик попросил подождать', paused.pauseUntil > NOW, true);
+      const askedBefore = requests;
+      login('b@example.com');
+      answer = ok200(12, 4);
+      paused.tick();
+      await settle();
+      // Пауза была выпрошена счётчиком прежнего аккаунта. Признак того, что она снята, —
+      // не значение поля (следующий отказ поставит новую), а сам факт нового обращения.
+      check('после смены аккаунта плагин спрашивает сразу, не досиживая чужую паузу',
+        requests > askedBefore, true);
+      check('и показывает цифры нового аккаунта', five(paused), 12);
+    } finally {
+      os.homedir = realHome;
+      fs.rmSync(fakeHome, { recursive: true, force: true });
+    }
+  }
+
   fs.unlinkSync(busyFile);
   Date.now = realNow;
   console.log(failed ? `\n✗ не сошлось: ${failed}\n` : '\n✓ всё сошлось\n');

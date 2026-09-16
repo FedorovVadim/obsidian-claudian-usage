@@ -57,6 +57,8 @@ const DEFAULTS = {
   warnPercent: 80,       // с какого процента красить в тревожный цвет
   lastUsage: null,       // последние прочитанные цифры — чтобы после запуска не быть пустым
   lastUsageAt: null,     // когда они прочитаны
+  lastUsageEmail: null,  // чьи это цифры: у владельца несколько учётных записей Anthropic,
+                         // и показывать расход одной под именем другой — хуже, чем не показывать
   lastOutcome: null,     // чем закончилось последнее обращение — видно в настройках
   pauseUntil: 0,         // до какого времени счётчик просил не беспокоить (переживает перезапуск)
 };
@@ -382,6 +384,13 @@ class ClaudianUsagePlugin extends Plugin {
     this.busy = true;         // работает ли Claude Code прямо сейчас — считаем раз в пульс
     this.email = readAccountEmail();
 
+    // Цифры с прошлого запуска годятся, только если вход выполнен под той же учётной
+    // записью. Аккаунтов у владельца несколько, и чужой расход под своим именем — это
+    // не «неточность», а неверные данные для решения «продолжать или подождать».
+    if (this.settings.lastUsageEmail && this.settings.lastUsageEmail !== this.email) {
+      this.forgetUsage();
+    }
+
     this.statusEl = this.addStatusBarItem();
     this.statusEl.addClass('cu-status');
     this.registerDomEvent(this.statusEl, 'click', () => { this.refresh(true); });
@@ -413,8 +422,36 @@ class ClaudianUsagePlugin extends Plugin {
   activeSec() { return Math.max(60, Number(this.settings.activeSec) || 120); }
   idleSec() { return Math.max(300, Number(this.settings.idleSec) || 900); }
 
+  /**
+   * Забыть цифры расхода: они принадлежали другой учётной записи.
+   *
+   * Снимаем и паузу с задержкой опроса — их просил счётчик прежнего аккаунта,
+   * к новому они отношения не имеют, а иначе новый молчал бы до конца чужой паузы.
+   */
+  forgetUsage() {
+    this.usage = null;
+    this.updatedAt = null;
+    this.error = null;
+    this.failStreak = 0;
+    this.pauseUntil = 0;
+    this.lastAttemptAt = 0;
+    this.resetSeen = null;
+    this.settings.lastUsage = null;
+    this.settings.lastUsageAt = null;
+    this.settings.pauseUntil = 0;
+  }
+
   /** Пульс: перерисовать время и, если пора, спросить счётчик */
   tick() {
+    // Учётную запись могли сменить на ходу — тогда показанные цифры уже не про неё.
+    // Проверяем каждый пульс: файл небольшой, а показать чужой расход дороже.
+    const emailNow = readAccountEmail();
+    if (emailNow !== this.email) {
+      this.email = emailNow;
+      this.forgetUsage();
+      this.persist();
+    }
+
     // busyMarks задаётся только в проверках, чтобы признак «Claude Code работает»
     // можно было задать наперёд; в работе берутся настоящие пути
     this.busy = claudeBusySince(this.lastAttemptAt, this.busyMarks);
@@ -485,6 +522,7 @@ class ClaudianUsagePlugin extends Plugin {
       this.email = readAccountEmail() || this.email;
       this.settings.lastUsage = this.usage;
       this.settings.lastUsageAt = this.updatedAt;
+      this.settings.lastUsageEmail = this.email;   // чьи это цифры — проверим при следующем запуске
       this.settings.pauseUntil = 0;
       this.settings.lastOutcome = { at: this.updatedAt, ok: true, note: 'счётчик ответил' };
     } else {
