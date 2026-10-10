@@ -1,80 +1,66 @@
 # Claudian Usage
 
-Your Claude Code account and two live limit gauges — five-hour session and weekly — in the Obsidian status bar.
+Remaining Claude and ChatGPT/Codex allowances in the Obsidian status bar.
 
+```text
+Claude  5 h 69% · 45 min  week 81% · Thu 12:00 | ChatGPT  week 99% · Sat 14:27
 ```
-fedorovvadim@example.com    5 ч ▓▓░░░░ 13%    нед ▓▓▓░░░ 16%
-```
 
-Hover to see when each limit resets. Click to refresh right away. The bar turns amber at 80 % and red at 95 %.
+The percentages are **remaining**, not spent. Hover for the used percentage, exact reset time, data age and next refresh. Click the status item to refresh both services.
 
-> macOS only — the access token is read from the macOS Keychain.
+## Data sources
 
----
-
-## It does not spend tokens
-
-The plugin never talks to a model. It reads the same usage endpoint the Claude app itself uses to draw your limits — a metadata call about quotas, not an inference request.
-
-Measured rather than assumed: 30+ consecutive calls did not move the weekly figure at all (16.0 % before, 16.0 % after), and two control readings a minute apart returned identical numbers.
-
-**Side finding from that test:** the endpoint has its own rate limit. A burst of 30 calls gets `429` with `Retry-After: 133`. Worse, you share that budget with Claude Code itself — it polls the same endpoint, so with a few sessions running the plugin gets throttled through no fault of its own.
-
-## How it keeps itself fresh (1.4.0)
-
-Earlier versions ran one long timer and, after a `429`, went quiet for up to half an hour. The numbers froze and the only way out was clicking them. Now:
-
-- **A 30-second heartbeat decides by the clock**, instead of one long timer. Obsidian throttles long timers in the background; a late heartbeat catches up immediately.
-- **Fast only while Claude Code is working.** Its working files change constantly while it runs — that is the signal. Idle, your percentage cannot grow, so the plugin stays quiet and saves the request budget for when it matters. Defaults: every 2 minutes while busy, every 15 minutes while idle.
-- **A `429` is routine, not a failure.** The plugin waits exactly as long as the service asks — never less than 30 seconds, never more than 10 minutes — and comes back on its own.
-- **Stale numbers admit it.** The tooltip always shows the age of the figures and when the next check is due; anything older than the idle interval is dimmed, so old numbers never pose as fresh.
-
-Run `node test/schedule.test.js` to check the scheduling rules.
-
-## Where the data comes from
-
-| What | Source | Leaves your machine? |
+| Service | Source | Model request? |
 |---|---|---|
-| Account e-mail | `~/.claude.json` → `oauthAccount.emailAddress` | no, read only |
-| Access token | macOS Keychain, item `Claude Code-credentials` | only to Anthropic's usage endpoint |
-| Percentages, reset times | `api.anthropic.com/api/oauth/usage` | — |
+| Claude | Claude Code account plus `api.anthropic.com/api/oauth/usage` | No |
+| ChatGPT/Codex | local `codex app-server` method `account/rateLimits/read` | No |
 
-The token is never written to plugin settings, logs or your vault. It is read fresh on every poll, so when Claude Code refreshes it, the plugin follows automatically.
+For Claude, the plugin reads the credential from the macOS Keychain or `~/.claude/.credentials.json` on Linux. It never writes the token to settings or logs.
+
+For ChatGPT, the plugin does **not** read the OpenAI OAuth token. Codex owns authentication and returns only quota metadata to the plugin. ChatGPT display requires Codex CLI to be installed and signed in with a ChatGPT account.
+
+## Refresh behavior
+
+- Claude: every 2 minutes while Claude Code is active, every 15 minutes while idle.
+- ChatGPT/Codex: every 5 minutes by default.
+- A 30-second heartbeat catches up after Obsidian has been backgrounded.
+- Expired windows are removed instead of showing a percentage from the previous window.
+- Old readings are dimmed and their age is shown in the tooltip.
+
+All intervals and visible gauges can be changed in **Settings → Claudian Usage**.
 
 ## Install
 
-**Via [BRAT](https://github.com/TfTHacker/obsidian42-brat) (recommended)**
+**BRAT:** add `FedorovVadim/obsidian-claudian-usage`, then enable **Claudian Usage**.
 
-1. Install BRAT from Community Plugins.
-2. BRAT → *Add Beta plugin* → paste `FedorovVadim/obsidian-claudian-usage`.
-3. Enable **Claudian Usage** in Community Plugins.
+**Manual:** copy `main.js`, `manifest.json`, and `styles.css` into:
 
-**Manually**
+```text
+<vault>/.obsidian/plugins/claudian-usage/
+```
 
-Download `main.js`, `manifest.json`, `styles.css` from the [latest release](../../releases/latest) into `<vault>/.obsidian/plugins/claudian-usage/`, then restart Obsidian.
+Restart Obsidian after updating the plugin.
 
-No configuration needed — if you are logged into Claude Code, the numbers appear on their own.
+## Development
 
-## Settings
-
-Hide the e-mail, show only one of the gauges, change either poll interval (busy 60–600 s, idle 300–3600 s) or the warning threshold. The settings tab also shows the age of the current figures, when the next check is due, and how the last one ended.
+```bash
+node --check main.js
+node tests/check.js
+node tests/chatgpt.js
+node tests/e2e-onload.js
+python3 tests/blind.py
+bash install.sh /path/to/vault
+```
 
 ## Troubleshooting
 
-| What you see | What it means |
+| Status text | Action |
 |---|---|
-| `Claude Code просит войти заново` | The token expired. Run `claude` in a terminal and log in — no Obsidian restart needed. |
-| `считаю…` that never changes | Keychain item missing. Check `security find-generic-password -s "Claude Code-credentials" -w`. |
-| Numbers stop updating for a couple of minutes | The endpoint throttled us; the plugin is waiting it out on purpose and will return by itself. Hover to see when. |
-| Gauges look dimmed | The figures are older than the idle interval. Deliberate — old numbers should not pose as fresh. |
-
-## Position in the status bar
-
-The status item asks to be leftmost (`order: -100`). Other plugins may still land to its left depending on load order — override `.cu-status { order: … }` in a CSS snippet if you want it elsewhere.
-
-## Interface language
-
-Russian, same as its sibling [Claudian Voice](https://github.com/FedorovVadim/obsidian-claudian-voice). Pull requests adding i18n are welcome.
+| `Claude · запусти claude` | Run `claude`; sign in only if Claude Code asks. |
+| `Claude · просит войти заново` | Run `claude` and sign in. |
+| `ChatGPT · Codex CLI не найден` | Install Codex CLI or set `CODEX_BIN` to its executable. |
+| `ChatGPT · ChatGPT просит войти в Codex` | Run `codex login`. |
+| Dimmed gauges | The saved reading is older than the configured refresh interval. |
 
 ## License
 
@@ -84,10 +70,8 @@ MIT © Vadim Fedorov
 
 ## По-русски
 
-Внизу окна видно, под какой почтой выполнен вход в Claude Code, и две шкалы расхода — пятичасовое окно и неделя. Наведёшь мышь — покажет, когда лимит обнулится; нажмёшь — обновит сразу.
+Плагин показывает внизу Obsidian **остатки** лимитов Claude и ChatGPT/Codex. Например, `69%` означает, что осталось 69 %, а не что столько израсходовано.
 
-Токены не тратит: читает служебный счётчик лимитов, тот же, что и само приложение Claude. Проверено замером — тридцать обращений подряд не сдвинули недельный расход.
+Claude читается из служебного счётчика Claude Code. ChatGPT читается через локальный `codex app-server`: сам плагин не получает OAuth-пропуск и не вызывает модель. Для шкалы ChatGPT нужен установленный Codex CLI со входом в нужную учётную запись ChatGPT.
 
-У счётчика есть свой предел частоты, и делим мы его с самим Claude Code — он спрашивает тот же адрес. Поэтому с версии 1.4.0 плагин спрашивает часто (раз в две минуты) только пока Claude Code работает: это видно по его служебным файлам. Когда он молчит, проценту расти неоткуда — плагин заглядывает к счётчику раз в четверть часа и бережёт запас обращений. Отказ «слишком часто» считается обычным делом: плагин ждёт названный срок (не дольше десяти минут) и возвращается сам, нажимать не нужно. Наведёшь мышь — видно возраст цифр и когда будет следующая проверка.
-
-Установка через BRAT: адрес `FedorovVadim/obsidian-claudian-usage`. Настраивать ничего не нужно.
+Наведение показывает расход, точное время сброса и возраст цифр. Нажатие обновляет оба счётчика. Установка через BRAT: `FedorovVadim/obsidian-claudian-usage`.

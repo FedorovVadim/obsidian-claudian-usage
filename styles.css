@@ -1,4 +1,4 @@
-/* Claudian Usage — строка расхода Claude внизу окна */
+/* Claudian Usage — остатки Claude и ChatGPT внизу окна */
 
 /* order отрицательный — чтобы блок стоял левее «Обратных ссылок» и прочих */
 .cu-status {
@@ -12,6 +12,24 @@
 .cu-account {
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+.cu-provider {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--size-4-2);
+}
+
+.cu-service {
+  color: var(--text-muted);
+  font-size: var(--font-smallest);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.cu-separator {
+  color: var(--background-modifier-border-hover);
+  user-select: none;
 }
 
 .cu-gauge {
@@ -62,10 +80,10 @@
   color: var(--text-faint);
 }
 
-/* последняя попытка не удалась — приглушаем, чтобы старые цифры не выдавались за свежие */
-.cu-status.cu-stale .cu-account,
-.cu-status.cu-stale .cu-num,
-.cu-status.cu-stale .cu-bar {
+/* каждый сервис стареет независимо: свежий ChatGPT не маскирует старый Claude и наоборот */
+.cu-provider.cu-stale .cu-service,
+.cu-provider.cu-stale .cu-num,
+.cu-provider.cu-stale .cu-bar {
   opacity: 0.55;
 }
 
